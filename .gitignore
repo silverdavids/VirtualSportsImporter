@@ -1,0 +1,19 @@
+bin/
+obj/
+.vs/
+
+*.user
+*.suo
+
+worker.err.log
+worker.out.log
+
+appsettings.Local.json
+
+# Local override files may contain real portal credentials and API keys.
+appsettings.Local.*.json
+!appsettings.Local.json.example
+
+Audit/
+Screenshots/
+HtmlSnapshots/
