@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Microsoft.Playwright;
 using VirtualSportsImporter.Worker.Models;
@@ -24,6 +25,9 @@ public sealed class VirtualSportsScraper
     public async Task<VirtualSportsScrapeResult> ExtractRowsAsync(
         string clientCode,
         DateTime businessDate,
+        DateTime fromDate,
+        DateTime toDate,
+        string? period,
         VirtualSportsOptions options,
         bool saveSuccessAudit,
         CancellationToken cancellationToken)
@@ -51,11 +55,21 @@ public sealed class VirtualSportsScraper
         {
             await LoginAsync(page, clientCode, options, cancellationToken);
             await OpenGeneralOverviewReportAsync(page, clientCode, options.Selectors, cancellationToken);
+            await SelectReportAgentAsync(page, clientCode, options, cancellationToken);
             dateRangeSelection = await SelectDateRangeAsync(
                 page,
                 clientCode,
                 options.Selectors,
                 businessDate,
+                fromDate,
+                toDate,
+                period,
+                cancellationToken);
+
+            dateRangeSelection = await RetryWithAvailableRangeIfNeededAsync(
+                page,
+                options.Selectors,
+                dateRangeSelection,
                 cancellationToken);
 
             if (saveSuccessAudit)
@@ -68,7 +82,58 @@ public sealed class VirtualSportsScraper
                     cancellationToken);
             }
 
-            await ExpandShopsNodeAsync(page, clientCode, options.Selectors, cancellationToken);
+            var portalReportError = await TryGetPortalReportErrorAsync(page, options.Selectors);
+
+            if (!string.IsNullOrWhiteSpace(portalReportError))
+            {
+                if (await IsReportDataAvailableAsync(page, options.Selectors))
+                {
+                    _logger.LogWarning(
+                        "VirtualSports portal report message ignored because report data is visible. ClientCode={ClientCode}, Message={PortalReportError}.",
+                        clientCode,
+                        portalReportError);
+                }
+                else
+                {
+                generatedReportArtifacts ??= await SaveAuditArtifactsAsync(
+                    page,
+                    options.AuditPath,
+                    businessDate,
+                    "portal-report-error",
+                    cancellationToken);
+
+                throw new VirtualSportsPortalReportException(
+                    portalReportError,
+                    dateRangeSelection.RequestedFromDateValue,
+                    dateRangeSelection.RequestedToDateValue,
+                    dateRangeSelection.ActualFromDateValue,
+                    dateRangeSelection.ActualToDateValue,
+                    dateRangeSelection.PortalAvailabilityMessage,
+                    dateRangeSelection.RetriedWithAvailableRange,
+                    generatedReportArtifacts.ScreenshotPath,
+                    generatedReportArtifacts.HtmlPath);
+                }
+            }
+
+            try
+            {
+                await ExpandShopsNodeAsync(page, clientCode, options.Selectors, cancellationToken);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(
+                "ExpandShopsNodeSelector",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new VirtualSportsPortalReportException(
+                    ex.Message,
+                    dateRangeSelection.RequestedFromDateValue,
+                    dateRangeSelection.RequestedToDateValue,
+                    dateRangeSelection.ActualFromDateValue,
+                    dateRangeSelection.ActualToDateValue,
+                    dateRangeSelection.PortalAvailabilityMessage,
+                    dateRangeSelection.RetriedWithAvailableRange,
+                    generatedReportArtifacts?.ScreenshotPath ?? string.Empty,
+                    generatedReportArtifacts?.HtmlPath ?? string.Empty);
+            }
 
             var rows = await ExtractReportRowsAsync(page, clientCode, options.Selectors, businessDate);
 
@@ -77,23 +142,31 @@ public sealed class VirtualSportsScraper
                 clientCode,
                 businessDate,
                 rows.Count,
-                dateRangeSelection.FromDateValue,
-                dateRangeSelection.ToDateValue,
+                dateRangeSelection.ActualFromDateValue,
+                dateRangeSelection.ActualToDateValue,
                 generatedReportArtifacts?.ScreenshotPath,
                 generatedReportArtifacts?.HtmlPath);
 
             return new VirtualSportsScrapeResult
             {
                 Rows = rows,
-                FromDateValue = dateRangeSelection.FromDateValue,
-                ToDateValue = dateRangeSelection.ToDateValue,
+                RequestedFromDateValue = dateRangeSelection.RequestedFromDateValue,
+                RequestedToDateValue = dateRangeSelection.RequestedToDateValue,
+                ActualFromDateValue = dateRangeSelection.ActualFromDateValue,
+                ActualToDateValue = dateRangeSelection.ActualToDateValue,
+                PortalAvailabilityMessage = dateRangeSelection.PortalAvailabilityMessage,
+                RetriedWithAvailableRange = dateRangeSelection.RetriedWithAvailableRange,
                 GeneratedReportScreenshotPath = generatedReportArtifacts?.ScreenshotPath ?? string.Empty,
                 GeneratedReportHtmlPath = generatedReportArtifacts?.HtmlPath ?? string.Empty
             };
         }
+        catch (VirtualSportsPortalReportException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            await SaveAuditArtifactsAsync(
+            var failureArtifacts = await SaveAuditArtifactsAsync(
                 page,
                 options.AuditPath,
                 businessDate,
@@ -112,10 +185,14 @@ public sealed class VirtualSportsScraper
             throw new VirtualSportsScrapeException(
                 ex.Message,
                 ex,
-                dateRangeSelection?.FromDateValue ?? string.Empty,
-                dateRangeSelection?.ToDateValue ?? string.Empty,
-                generatedReportArtifacts?.ScreenshotPath ?? string.Empty,
-                generatedReportArtifacts?.HtmlPath ?? string.Empty);
+                dateRangeSelection?.RequestedFromDateValue ?? string.Empty,
+                dateRangeSelection?.RequestedToDateValue ?? string.Empty,
+                dateRangeSelection?.ActualFromDateValue ?? string.Empty,
+                dateRangeSelection?.ActualToDateValue ?? string.Empty,
+                dateRangeSelection?.PortalAvailabilityMessage ?? string.Empty,
+                dateRangeSelection?.RetriedWithAvailableRange ?? false,
+                generatedReportArtifacts?.ScreenshotPath ?? failureArtifacts.ScreenshotPath,
+                generatedReportArtifacts?.HtmlPath ?? failureArtifacts.HtmlPath);
         }
     }
 
@@ -438,37 +515,80 @@ public sealed class VirtualSportsScraper
         string clientCode,
         VirtualSportsSelectorsOptions selectors,
         DateTime businessDate,
+        DateTime fromDate,
+        DateTime toDate,
+        string? period,
         CancellationToken cancellationToken)
     {
-        var fromDate = businessDate.Date.ToString("yyyy-MM-dd 00:00", CultureInfo.InvariantCulture);
-        var toDate = businessDate.Date.AddDays(1).ToString("yyyy-MM-dd 00:00", CultureInfo.InvariantCulture);
+        var fromDateValue = fromDate.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        var toDateValue = toDate.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        var normalizedPeriod = period?.Trim().ToLowerInvariant();
 
         _logger.LogInformation(
             "VirtualSports navigation step started. ClientCode={ClientCode}, Step={Step}, BusinessDate={BusinessDate:yyyy-MM-dd}, FromDate={FromDate}, ToDate={ToDate}.",
             clientCode,
             "Select Date Range",
             businessDate,
-            fromDate,
-            toDate);
+            fromDateValue,
+            toDateValue);
 
-        await FillDateAsync(
-            page,
-            selectors.FromDate,
-            fromDate,
-            "FromDate",
-            selectors.DatePickerOkButton,
-            cancellationToken);
-        await FillDateAsync(
-            page,
-            selectors.ToDate,
-            toDate,
-            "ToDate",
-            selectors.DatePickerOkButton,
-            cancellationToken);
-        await SetDateInputValueAsync(page, selectors.FromDate, fromDate, "FromDate");
-        await SetDateInputValueAsync(page, selectors.ToDate, toDate, "ToDate");
-        await page.Keyboard.PressAsync("Escape");
-        await page.Keyboard.PressAsync("Escape");
+        if (normalizedPeriod is "today")
+        {
+            await SelectTimeframeAsync(
+                page,
+                selectors,
+                selectors.TimeframeTodayText,
+                "TimeframeTodayText",
+                cancellationToken);
+        }
+        else if (normalizedPeriod is "yesterday")
+        {
+            await SelectTimeframeAsync(
+                page,
+                selectors,
+                selectors.TimeframeYesterdayText,
+                "TimeframeYesterdayText",
+                cancellationToken);
+        }
+        else
+        {
+            await SelectTimeframeAsync(
+                page,
+                selectors,
+                selectors.TimeframeCustomText,
+                "TimeframeCustomText",
+                cancellationToken,
+                required: false);
+            await FillDateAsync(
+                page,
+                selectors.FromDate,
+                fromDateValue,
+                "FromDate",
+                selectors.DatePickerOkButton,
+                cancellationToken);
+            await FillDateAsync(
+                page,
+                selectors.ToDate,
+                toDateValue,
+                "ToDate",
+                selectors.DatePickerOkButton,
+                cancellationToken);
+            await SetDateInputValueAsync(page, selectors.FromDate, fromDateValue, "FromDate");
+            await SetDateInputValueAsync(page, selectors.ToDate, toDateValue, "ToDate");
+            await page.Keyboard.PressAsync("Escape");
+            await page.Keyboard.PressAsync("Escape");
+        }
+
+        _logger.LogInformation(
+            "VirtualSports date selection applied. ClientCode={ClientCode}, BusinessDate={BusinessDate:yyyy-MM-dd}, Period={Period}.",
+            clientCode,
+            businessDate,
+            normalizedPeriod ?? "legacy");
+
+        await ClickGenerateReportAsync(page, selectors.SearchButton, cancellationToken);
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await WaitForOptionalHiddenAsync(page, selectors.ReportLoadingIndicator);
+        await page.WaitForTimeoutAsync(1000);
 
         var selectedFromDate = await ReadInputValueAsync(page, selectors.FromDate, "FromDate");
         var selectedToDate = await ReadInputValueAsync(page, selectors.ToDate, "ToDate");
@@ -479,11 +599,6 @@ public sealed class VirtualSportsScraper
             businessDate,
             selectedFromDate,
             selectedToDate);
-
-        await ClickRequiredAsync(page, selectors.SearchButton, "SearchButton", cancellationToken, force: true);
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
-        await WaitForOptionalHiddenAsync(page, selectors.ReportLoadingIndicator);
-        await page.WaitForTimeoutAsync(1000);
 
         _logger.LogInformation(
             "VirtualSports navigation step completed. ClientCode={ClientCode}, Step={Step}, BusinessDate={BusinessDate:yyyy-MM-dd}, FromDateValue={FromDateValue}, ToDateValue={ToDateValue}.",
@@ -497,8 +612,117 @@ public sealed class VirtualSportsScraper
 
         return new DateRangeSelectionResult
         {
-            FromDateValue = selectedFromDate,
-            ToDateValue = selectedToDate
+            RequestedFromDateValue = selectedFromDate,
+            RequestedToDateValue = selectedToDate,
+            ActualFromDateValue = selectedFromDate,
+            ActualToDateValue = selectedToDate
+        };
+    }
+
+    private async Task SelectReportAgentAsync(
+        IPage page,
+        string clientCode,
+        VirtualSportsOptions options,
+        CancellationToken cancellationToken)
+    {
+        var selectors = options.Selectors;
+
+        if (string.IsNullOrWhiteSpace(selectors.AgentInput))
+        {
+            return;
+        }
+
+        _logger.LogInformation(
+            "VirtualSports navigation step started. ClientCode={ClientCode}, Step={Step}.",
+            clientCode,
+            "Select Report Agent");
+
+        await WaitForRequiredAsync(page, selectors.AgentInput, "AgentInput");
+
+        var agentInput = page.Locator(selectors.AgentInput).First;
+        await agentInput.ClickAsync();
+        await agentInput.FillAsync(options.Username);
+        await page.WaitForTimeoutAsync(500);
+
+        if (!string.IsNullOrWhiteSpace(selectors.AgentOption))
+        {
+            await ClickRequiredAsync(page, selectors.AgentOption, "AgentOption", cancellationToken);
+        }
+        else
+        {
+            await page.Keyboard.PressAsync("ArrowDown");
+            await page.Keyboard.PressAsync("Enter");
+            await page.Keyboard.PressAsync("Tab");
+        }
+
+        await page.WaitForTimeoutAsync(500);
+
+        _logger.LogInformation(
+            "VirtualSports navigation step completed. ClientCode={ClientCode}, Step={Step}.",
+            clientCode,
+            "Select Report Agent");
+
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private async Task<DateRangeSelectionResult> RetryWithAvailableRangeIfNeededAsync(
+        IPage page,
+        VirtualSportsSelectorsOptions selectors,
+        DateRangeSelectionResult initialSelection,
+        CancellationToken cancellationToken)
+    {
+        var availabilityRange = await TryGetPortalAvailabilityRangeAsync(page, selectors);
+
+        if (availabilityRange is null)
+        {
+            return initialSelection;
+        }
+
+        _logger.LogInformation(
+            "VirtualSports portal availability range detected. Message={PortalAvailabilityMessage}, AvailableFrom={AvailableFrom}, AvailableTo={AvailableTo}. Retrying with available range.",
+            availabilityRange.Message,
+            availabilityRange.AvailableFrom,
+            availabilityRange.AvailableTo);
+
+        await SelectTimeframeAsync(
+            page,
+            selectors,
+            selectors.TimeframeCustomText,
+            "TimeframeCustomText",
+            cancellationToken,
+            required: false);
+        await FillDateAsync(
+            page,
+            selectors.FromDate,
+            availabilityRange.AvailableFrom,
+            "FromDate",
+            selectors.DatePickerOkButton,
+            cancellationToken);
+        await FillDateAsync(
+            page,
+            selectors.ToDate,
+            availabilityRange.AvailableTo,
+            "ToDate",
+            selectors.DatePickerOkButton,
+            cancellationToken);
+        await SetDateInputValueAsync(page, selectors.FromDate, availabilityRange.AvailableFrom, "FromDate");
+        await SetDateInputValueAsync(page, selectors.ToDate, availabilityRange.AvailableTo, "ToDate");
+        await page.Keyboard.PressAsync("Escape");
+        await page.Keyboard.PressAsync("Escape");
+        await ClickGenerateReportAsync(page, selectors.SearchButton, cancellationToken);
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await WaitForOptionalHiddenAsync(page, selectors.ReportLoadingIndicator);
+        await page.WaitForTimeoutAsync(1000);
+
+        var actualFrom = await ReadInputValueAsync(page, selectors.FromDate, "FromDate");
+        var actualTo = await ReadInputValueAsync(page, selectors.ToDate, "ToDate");
+
+        return initialSelection with
+        {
+            ActualFromDateValue = actualFrom,
+            ActualToDateValue = actualTo,
+            PortalAvailabilityMessage = availabilityRange.Message,
+            RetriedWithAvailableRange = true
         };
     }
 
@@ -565,6 +789,35 @@ public sealed class VirtualSportsScraper
         return rows;
     }
 
+    private static async Task<bool> IsReportDataAvailableAsync(
+        IPage page,
+        VirtualSportsSelectorsOptions selectors)
+    {
+        if (string.IsNullOrWhiteSpace(selectors.ExpandShopsNodeSelector))
+        {
+            return false;
+        }
+
+        try
+        {
+            await page.Locator(selectors.ExpandShopsNodeSelector).First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 1000
+            });
+
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+        catch (PlaywrightException)
+        {
+            return false;
+        }
+    }
+
     private static async Task FillRequiredAsync(
         IPage page,
         string selector,
@@ -595,6 +848,76 @@ public sealed class VirtualSportsScraper
         await page.WaitForTimeoutAsync(250);
 
         cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static async Task SelectTimeframeAsync(
+        IPage page,
+        VirtualSportsSelectorsOptions selectors,
+        string timeframeText,
+        string optionName,
+        CancellationToken cancellationToken,
+        bool required = true)
+    {
+        if (string.IsNullOrWhiteSpace(timeframeText))
+        {
+            if (required)
+            {
+                throw new InvalidOperationException(
+                    $"VirtualSports selector '{optionName}' must be configured before it can be used.");
+            }
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(selectors.TimeframeSelect))
+        {
+            if (required)
+            {
+                throw new InvalidOperationException(
+                    "VirtualSports selector 'TimeframeSelect' must be configured before it can be used.");
+            }
+
+            return;
+        }
+
+        var select = await FindSelectWithOptionAsync(page, selectors.TimeframeSelect, timeframeText);
+
+        try
+        {
+            await select.SelectOptionAsync(new[] { new SelectOptionValue { Label = timeframeText } });
+        }
+        catch (PlaywrightException)
+        {
+            await select.SelectOptionAsync(new[] { new SelectOptionValue { Value = timeframeText } });
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static async Task<ILocator> FindSelectWithOptionAsync(
+        IPage page,
+        string selector,
+        string optionText)
+    {
+        await WaitForRequiredAsync(page, selector, "TimeframeSelect");
+
+        var candidates = await page.Locator(selector).AllAsync();
+
+        foreach (var candidate in candidates)
+        {
+            var hasOption = await candidate.EvaluateAsync<bool>(
+                @"(select, optionText) => Array.from(select.options || [])
+                    .some(option => option.text.trim() === optionText || option.value === optionText)",
+                optionText);
+
+            if (hasOption)
+            {
+                return candidate;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"VirtualSports timeframe option '{optionText}' was not found in any select matching selector: {selector}");
     }
 
     private static async Task SetDateInputValueAsync(
@@ -715,6 +1038,114 @@ public sealed class VirtualSportsScraper
         }
     }
 
+    private static async Task<string> TryGetPortalReportErrorAsync(
+        IPage page,
+        VirtualSportsSelectorsOptions selectors)
+    {
+        var selector = string.IsNullOrWhiteSpace(selectors.ReportErrorMessage)
+            ? "text=/available just for period|financial data is available|To Date must be after From Date/i"
+            : selectors.ReportErrorMessage;
+
+        try
+        {
+            var locator = page.Locator(selector).First;
+            await locator.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 500
+            });
+
+            return (await locator.InnerTextAsync()).Trim();
+        }
+        catch (TimeoutException)
+        {
+            return string.Empty;
+        }
+        catch (PlaywrightException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static async Task<PortalAvailabilityRange?> TryGetPortalAvailabilityRangeAsync(
+        IPage page,
+        VirtualSportsSelectorsOptions selectors)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var pageText = string.Empty;
+
+            try
+            {
+                pageText = await page.Locator("body").InnerTextAsync();
+            }
+            catch (PlaywrightException)
+            {
+                // Fall back to the configured report-error selector below.
+            }
+
+            if (TryParseAvailableRange(
+                    pageText,
+                    out var portalAvailabilityMessage,
+                    out var availableFrom,
+                    out var availableTo))
+            {
+                return new PortalAvailabilityRange(portalAvailabilityMessage, availableFrom, availableTo);
+            }
+
+            var selectorMessage = await TryGetPortalReportErrorAsync(page, selectors);
+
+            if (TryParseAvailableRange(
+                    selectorMessage,
+                    out portalAvailabilityMessage,
+                    out availableFrom,
+                    out availableTo))
+            {
+                return new PortalAvailabilityRange(portalAvailabilityMessage, availableFrom, availableTo);
+            }
+
+            await page.WaitForTimeoutAsync(500);
+        }
+
+        return null;
+    }
+
+    private static bool TryParseAvailableRange(
+        string message,
+        out string portalAvailabilityMessage,
+        out string availableFrom,
+        out string availableTo)
+    {
+        portalAvailabilityMessage = string.Empty;
+        availableFrom = string.Empty;
+        availableTo = string.Empty;
+
+        var match = Regex.Match(
+            message,
+            @"financial\s+data\s+is\s+available\s+just\s+for\s+period\s+from\s+(?<from>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+to\s+(?<to>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+        if (!match.Success)
+        {
+            match = Regex.Match(
+                message,
+                @"available\s+just\s+for\s+period\s+from\s+(?<from>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+to\s+(?<to>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+            if (!match.Success)
+            {
+                return false;
+            }
+        }
+
+        portalAvailabilityMessage = Regex.Replace(match.Value, @"\s+", " ").Trim();
+        availableFrom = match.Groups["from"].Value;
+        availableTo = match.Groups["to"].Value;
+        return true;
+    }
+
     private static async Task<string> ReadInputValueAsync(
         IPage page,
         string selector,
@@ -736,6 +1167,24 @@ public sealed class VirtualSportsScraper
         {
             Force = force
         });
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static async Task ClickGenerateReportAsync(
+        IPage page,
+        string selector,
+        CancellationToken cancellationToken)
+    {
+        await WaitForRequiredAsync(page, selector, "SearchButton");
+        var button = page.Locator(selector).First;
+
+        await button.ScrollIntoViewIfNeededAsync();
+        await button.EvaluateAsync(
+            @"element => {
+                element.focus();
+                element.click();
+            }");
+
         cancellationToken.ThrowIfCancellationRequested();
     }
 
@@ -1054,9 +1503,21 @@ public sealed class VirtualSportsScrapeResult
 {
     public IReadOnlyCollection<VirtualSportsImportRow> Rows { get; init; } = [];
 
-    public string FromDateValue { get; init; } = string.Empty;
+    public string RequestedFromDateValue { get; init; } = string.Empty;
 
-    public string ToDateValue { get; init; } = string.Empty;
+    public string RequestedToDateValue { get; init; } = string.Empty;
+
+    public string ActualFromDateValue { get; init; } = string.Empty;
+
+    public string ActualToDateValue { get; init; } = string.Empty;
+
+    public string FromDateValue => ActualFromDateValue;
+
+    public string ToDateValue => ActualToDateValue;
+
+    public string PortalAvailabilityMessage { get; init; } = string.Empty;
+
+    public bool RetriedWithAvailableRange { get; init; }
 
     public string GeneratedReportScreenshotPath { get; init; } = string.Empty;
 
@@ -1068,33 +1529,111 @@ public sealed class VirtualSportsScrapeException : Exception
     public VirtualSportsScrapeException(
         string message,
         Exception innerException,
-        string fromDateValue,
-        string toDateValue,
+        string requestedFromDateValue,
+        string requestedToDateValue,
+        string actualFromDateValue,
+        string actualToDateValue,
+        string portalAvailabilityMessage,
+        bool retriedWithAvailableRange,
         string generatedReportScreenshotPath,
         string generatedReportHtmlPath)
         : base(message, innerException)
     {
-        FromDateValue = fromDateValue;
-        ToDateValue = toDateValue;
+        RequestedFromDateValue = requestedFromDateValue;
+        RequestedToDateValue = requestedToDateValue;
+        ActualFromDateValue = actualFromDateValue;
+        ActualToDateValue = actualToDateValue;
+        PortalAvailabilityMessage = portalAvailabilityMessage;
+        RetriedWithAvailableRange = retriedWithAvailableRange;
         GeneratedReportScreenshotPath = generatedReportScreenshotPath;
         GeneratedReportHtmlPath = generatedReportHtmlPath;
     }
 
-    public string FromDateValue { get; }
+    public string RequestedFromDateValue { get; }
 
-    public string ToDateValue { get; }
+    public string RequestedToDateValue { get; }
+
+    public string ActualFromDateValue { get; }
+
+    public string ActualToDateValue { get; }
+
+    public string FromDateValue => ActualFromDateValue;
+
+    public string ToDateValue => ActualToDateValue;
+
+    public string PortalAvailabilityMessage { get; }
+
+    public bool RetriedWithAvailableRange { get; }
 
     public string GeneratedReportScreenshotPath { get; }
 
     public string GeneratedReportHtmlPath { get; }
 }
 
-public sealed class DateRangeSelectionResult
+public sealed class VirtualSportsPortalReportException : Exception
 {
-    public string FromDateValue { get; init; } = string.Empty;
+    public VirtualSportsPortalReportException(
+        string message,
+        string requestedFromDateValue,
+        string requestedToDateValue,
+        string actualFromDateValue,
+        string actualToDateValue,
+        string portalAvailabilityMessage,
+        bool retriedWithAvailableRange,
+        string generatedReportScreenshotPath,
+        string generatedReportHtmlPath)
+        : base(message)
+    {
+        RequestedFromDateValue = requestedFromDateValue;
+        RequestedToDateValue = requestedToDateValue;
+        ActualFromDateValue = actualFromDateValue;
+        ActualToDateValue = actualToDateValue;
+        PortalAvailabilityMessage = portalAvailabilityMessage;
+        RetriedWithAvailableRange = retriedWithAvailableRange;
+        GeneratedReportScreenshotPath = generatedReportScreenshotPath;
+        GeneratedReportHtmlPath = generatedReportHtmlPath;
+    }
 
-    public string ToDateValue { get; init; } = string.Empty;
+    public string RequestedFromDateValue { get; }
+
+    public string RequestedToDateValue { get; }
+
+    public string ActualFromDateValue { get; }
+
+    public string ActualToDateValue { get; }
+
+    public string FromDateValue => ActualFromDateValue;
+
+    public string ToDateValue => ActualToDateValue;
+
+    public string PortalAvailabilityMessage { get; }
+
+    public bool RetriedWithAvailableRange { get; }
+
+    public string GeneratedReportScreenshotPath { get; }
+
+    public string GeneratedReportHtmlPath { get; }
 }
+
+public sealed record DateRangeSelectionResult
+{
+    public string RequestedFromDateValue { get; init; } = string.Empty;
+
+    public string RequestedToDateValue { get; init; } = string.Empty;
+
+    public string ActualFromDateValue { get; init; } = string.Empty;
+
+    public string ActualToDateValue { get; init; } = string.Empty;
+
+    public string PortalAvailabilityMessage { get; init; } = string.Empty;
+
+    public bool RetriedWithAvailableRange { get; init; }
+}
+
+public sealed record PortalAvailabilityRange(
+    string Message,
+    string AvailableFrom,
+    string AvailableTo);
 
 public sealed class AuditArtifactPaths
 {

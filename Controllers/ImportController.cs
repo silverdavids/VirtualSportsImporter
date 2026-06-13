@@ -30,26 +30,31 @@ public sealed class ImportController : ControllerBase
             });
         }
 
-        if (request.BusinessDate is null)
+        ImportRunResult result;
+
+        try
+        {
+            result = await _importJobRunner.RunAsync(
+                request.ClientCode,
+                request,
+                cancellationToken);
+        }
+        catch (ImportRunDateValidationException ex)
         {
             return BadRequest(new
             {
                 success = false,
-                errors = new[] { "businessDate is required." }
+                errors = new[] { ex.Message }
             });
         }
-
-        var result = await _importJobRunner.RunAsync(
-            request.ClientCode,
-            request.BusinessDate.Value.Date,
-            request.DryRun,
-            cancellationToken);
 
         var response = new
         {
             success = result.Success,
+            isRecoverableFailure = result.IsRecoverableFailure,
             clientCode = result.ClientCode,
             dryRun = result.DryRun,
+            period = result.Period,
             businessDate = result.BusinessDate.ToString("yyyy-MM-dd"),
             rowCount = result.RowCount,
             rowsImported = result.RowsImported,
@@ -58,6 +63,12 @@ public sealed class ImportController : ControllerBase
             totalTickets = result.TotalTickets,
             fromDateValue = result.FromDateValue,
             toDateValue = result.ToDateValue,
+            requestedFromDateValue = result.RequestedFromDateValue,
+            requestedToDateValue = result.RequestedToDateValue,
+            actualFromDateValue = result.ActualFromDateValue,
+            actualToDateValue = result.ActualToDateValue,
+            portalAvailabilityMessage = result.PortalAvailabilityMessage,
+            retriedWithAvailableRange = result.RetriedWithAvailableRange,
             generatedReportScreenshotPath = result.GeneratedReportScreenshotPath,
             generatedReportHtmlPath = result.GeneratedReportHtmlPath,
             rows = result.DryRun ? result.Rows.Select(row => new
@@ -73,7 +84,7 @@ public sealed class ImportController : ControllerBase
             errors = result.Errors
         };
 
-        if (result.Success)
+        if (result.Success || result.IsRecoverableFailure)
         {
             return Ok(response);
         }

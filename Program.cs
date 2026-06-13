@@ -20,6 +20,8 @@ builder.Services.AddSingleton<IReadOnlyList<ClientImportApiOptions>>(_ =>
         .Get<List<ClientImportApiOptions>>() ?? []);
 
 builder.Services.AddSingleton<VirtualSportsScraper>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<ImportRunDateResolver>();
 builder.Services.AddScoped<ImportJobRunner>();
 builder.Services.AddHttpClient<ProductImportApiClient>();
 

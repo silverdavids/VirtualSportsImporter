@@ -16,6 +16,10 @@ public sealed class VirtualSportsOptions
 
     public string AuditPath { get; set; } = @"C:\ProductImports\VirtualSports";
 
+    public string ReportTimeZone { get; set; } = "UTC";
+
+    public string TodayToMode { get; set; } = "CurrentHour";
+
     public string LoginSuccessUrlContains { get; set; } = string.Empty;
 
     public string LoginSuccessSelector { get; set; } = string.Empty;
@@ -41,15 +45,29 @@ public sealed class VirtualSportsSelectorsOptions
 
     public string ExpandShopsNodeSelector { get; set; } = string.Empty;
 
+    public string AgentInput { get; set; } = string.Empty;
+
+    public string AgentOption { get; set; } = string.Empty;
+
     public string FromDate { get; set; } = string.Empty;
 
     public string ToDate { get; set; } = string.Empty;
+
+    public string TimeframeSelect { get; set; } = string.Empty;
+
+    public string TimeframeTodayText { get; set; } = string.Empty;
+
+    public string TimeframeYesterdayText { get; set; } = string.Empty;
+
+    public string TimeframeCustomText { get; set; } = string.Empty;
 
     public string DatePickerOkButton { get; set; } = string.Empty;
 
     public string SearchButton { get; set; } = string.Empty;
 
     public string ReportLoadingIndicator { get; set; } = string.Empty;
+
+    public string ReportErrorMessage { get; set; } = string.Empty;
 
     public string ReportTable { get; set; } = string.Empty;
 

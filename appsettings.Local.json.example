@@ -9,6 +9,8 @@
     "Headless": true,
     "TimeoutSeconds": 60,
     "AuditPath": "C:\\ProductImports\\VirtualSports",
+    "ReportTimeZone": "UTC",
+    "TodayToMode": "CurrentHour",
     "LoginSuccessUrlContains": "",
     "LoginSuccessSelector": "",
     "LoginFailureSelector": "",
@@ -20,11 +22,18 @@
       "LoginButton": "",
       "GeneralOverviewMenu": "",
       "ExpandShopsNodeSelector": "",
+      "AgentInput": "",
+      "AgentOption": "",
       "FromDate": "",
       "ToDate": "",
+      "TimeframeSelect": "select.common-ListBox, select",
+      "TimeframeTodayText": "Today",
+      "TimeframeYesterdayText": "Yesterday",
+      "TimeframeCustomText": "Timeframe",
       "DatePickerOkButton": "",
       "SearchButton": "",
       "ReportLoadingIndicator": "",
+      "ReportErrorMessage": "",
       "ReportTable": "",
       "ReportRows": "",
       "ShopCodeCell": "",
@@ -46,7 +55,9 @@
         "Password": "",
         "Headless": true,
         "TimeoutSeconds": 60,
-        "AuditPath": "C:\\ProductImports\\VirtualSports"
+        "AuditPath": "C:\\ProductImports\\VirtualSports",
+        "ReportTimeZone": "UTC",
+        "TodayToMode": "CurrentHour"
       }
     }
   ],

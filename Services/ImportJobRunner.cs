@@ -9,41 +9,50 @@ public sealed class ImportJobRunner
     private readonly VirtualSportsScraper _scraper;
     private readonly ProductImportApiClient _productImportApiClient;
     private readonly IOptions<VirtualSportsOptions> _globalVirtualSportsOptions;
+    private readonly ImportRunDateResolver _dateResolver;
     private readonly ILogger<ImportJobRunner> _logger;
 
     public ImportJobRunner(
         VirtualSportsScraper scraper,
         ProductImportApiClient productImportApiClient,
         IOptions<VirtualSportsOptions> globalVirtualSportsOptions,
+        ImportRunDateResolver dateResolver,
         ILogger<ImportJobRunner> logger)
     {
         _scraper = scraper;
         _productImportApiClient = productImportApiClient;
         _globalVirtualSportsOptions = globalVirtualSportsOptions;
+        _dateResolver = dateResolver;
         _logger = logger;
     }
 
     public async Task<ImportRunResult> RunAsync(
         string clientCode,
-        DateTime businessDate,
-        bool dryRun,
+        ImportRunRequest request,
         CancellationToken cancellationToken = default)
     {
         var errors = new List<string>();
+        ImportRunDateResolution? dateResolution = null;
+        var businessDate = DateTime.MinValue;
 
         try
         {
             var client = _productImportApiClient.GetClientOrThrow(clientCode);
             var virtualSportsOptions = BuildVirtualSportsOptions(client);
+            dateResolution = _dateResolver.Resolve(request, virtualSportsOptions);
+            businessDate = dateResolution.BusinessDate.ToDateTime(TimeOnly.MinValue);
             var scrapeResult = await _scraper.ExtractRowsAsync(
                 client.ClientCode,
-                businessDate.Date,
+                businessDate,
+                dateResolution.From,
+                dateResolution.To,
+                dateResolution.Period,
                 virtualSportsOptions,
-                dryRun,
+                request.DryRun,
                 cancellationToken);
             var rows = scrapeResult.Rows;
 
-            if (!dryRun)
+            if (!request.DryRun)
             {
                 await _productImportApiClient.PostBulkAsync(client, businessDate.Date, rows, cancellationToken);
             }
@@ -51,10 +60,15 @@ public sealed class ImportJobRunner
             var result = ImportRunResult.Successful(
                 client.ClientCode,
                 businessDate.Date,
-                dryRun,
+                request.DryRun,
+                dateResolution.Period,
                 rows,
-                scrapeResult.FromDateValue,
-                scrapeResult.ToDateValue,
+                scrapeResult.RequestedFromDateValue,
+                scrapeResult.RequestedToDateValue,
+                scrapeResult.ActualFromDateValue,
+                scrapeResult.ActualToDateValue,
+                scrapeResult.PortalAvailabilityMessage,
+                scrapeResult.RetriedWithAvailableRange,
                 scrapeResult.GeneratedReportScreenshotPath,
                 scrapeResult.GeneratedReportHtmlPath);
 
@@ -71,39 +85,86 @@ public sealed class ImportJobRunner
 
             return result;
         }
+        catch (ImportRunDateValidationException)
+        {
+            throw;
+        }
+        catch (VirtualSportsPortalReportException ex)
+        {
+            errors.Add(ex.Message);
+
+            _logger.LogWarning(
+                ex,
+                "Product import run stopped by portal report message. ClientCode={ClientCode}, DryRun={DryRun}, BusinessDate={BusinessDate:yyyy-MM-dd}, FromDateValue={FromDateValue}, ToDateValue={ToDateValue}, Errors={ErrorCount}",
+                clientCode,
+                request.DryRun,
+                businessDate.Date,
+                ex.ActualFromDateValue,
+                ex.ActualToDateValue,
+                errors.Count);
+
+            return ImportRunResult.Failed(
+                clientCode,
+                businessDate.Date,
+                request.DryRun,
+                dateResolution?.Period,
+                errors,
+                ex.RequestedFromDateValue,
+                ex.RequestedToDateValue,
+                ex.ActualFromDateValue,
+                ex.ActualToDateValue,
+                ex.PortalAvailabilityMessage,
+                ex.RetriedWithAvailableRange,
+                ex.GeneratedReportScreenshotPath,
+                ex.GeneratedReportHtmlPath,
+                isRecoverableFailure: true);
+        }
         catch (Exception ex)
         {
             errors.Add(ex.Message);
             var generatedReportScreenshotPath = string.Empty;
             var generatedReportHtmlPath = string.Empty;
-            var fromDateValue = string.Empty;
-            var toDateValue = string.Empty;
+            var requestedFromDateValue = string.Empty;
+            var requestedToDateValue = string.Empty;
+            var actualFromDateValue = string.Empty;
+            var actualToDateValue = string.Empty;
+            var portalAvailabilityMessage = string.Empty;
+            var retriedWithAvailableRange = false;
 
             if (ex is VirtualSportsScrapeException scrapeException)
             {
                 generatedReportScreenshotPath = scrapeException.GeneratedReportScreenshotPath;
                 generatedReportHtmlPath = scrapeException.GeneratedReportHtmlPath;
-                fromDateValue = scrapeException.FromDateValue;
-                toDateValue = scrapeException.ToDateValue;
+                requestedFromDateValue = scrapeException.RequestedFromDateValue;
+                requestedToDateValue = scrapeException.RequestedToDateValue;
+                actualFromDateValue = scrapeException.ActualFromDateValue;
+                actualToDateValue = scrapeException.ActualToDateValue;
+                portalAvailabilityMessage = scrapeException.PortalAvailabilityMessage;
+                retriedWithAvailableRange = scrapeException.RetriedWithAvailableRange;
             }
 
             _logger.LogError(
                 ex,
                 "Product import run failed. ClientCode={ClientCode}, DryRun={DryRun}, BusinessDate={BusinessDate:yyyy-MM-dd}, FromDateValue={FromDateValue}, ToDateValue={ToDateValue}, Rows=0, TotalSales=0, TotalPayout=0, TotalTickets=0, Errors={ErrorCount}",
                 clientCode,
-                dryRun,
+                request.DryRun,
                 businessDate.Date,
-                fromDateValue,
-                toDateValue,
+                actualFromDateValue,
+                actualToDateValue,
                 errors.Count);
 
             return ImportRunResult.Failed(
                 clientCode,
                 businessDate.Date,
-                dryRun,
+                request.DryRun,
+                dateResolution?.Period,
                 errors,
-                fromDateValue,
-                toDateValue,
+                requestedFromDateValue,
+                requestedToDateValue,
+                actualFromDateValue,
+                actualToDateValue,
+                portalAvailabilityMessage,
+                retriedWithAvailableRange,
                 generatedReportScreenshotPath,
                 generatedReportHtmlPath);
         }
@@ -214,6 +275,8 @@ public sealed class ImportJobRunner
                 Headless = global.Headless,
                 TimeoutSeconds = global.TimeoutSeconds,
                 AuditPath = global.AuditPath,
+                ReportTimeZone = global.ReportTimeZone,
+                TodayToMode = global.TodayToMode,
                 LoginSuccessUrlContains = global.LoginSuccessUrlContains,
                 LoginSuccessSelector = global.LoginSuccessSelector,
                 LoginFailureSelector = global.LoginFailureSelector,
@@ -233,6 +296,8 @@ public sealed class ImportJobRunner
                 ? clientVirtualSports.TimeoutSeconds
                 : global.TimeoutSeconds,
             AuditPath = FirstConfigured(clientVirtualSports.AuditPath, global.AuditPath),
+            ReportTimeZone = FirstConfigured(clientVirtualSports.ReportTimeZone, global.ReportTimeZone),
+            TodayToMode = FirstConfigured(clientVirtualSports.TodayToMode, global.TodayToMode),
             LoginSuccessUrlContains = FirstConfigured(
                 clientVirtualSports.LoginSuccessUrlContains,
                 global.LoginSuccessUrlContains),
@@ -270,13 +335,22 @@ public sealed class ImportJobRunner
             ExpandShopsNodeSelector = FirstConfigured(
                 primary.ExpandShopsNodeSelector,
                 fallback.ExpandShopsNodeSelector),
+            AgentInput = FirstConfigured(primary.AgentInput, fallback.AgentInput),
+            AgentOption = FirstConfigured(primary.AgentOption, fallback.AgentOption),
             FromDate = FirstConfigured(primary.FromDate, fallback.FromDate),
             ToDate = FirstConfigured(primary.ToDate, fallback.ToDate),
+            TimeframeSelect = FirstConfigured(primary.TimeframeSelect, fallback.TimeframeSelect),
+            TimeframeTodayText = FirstConfigured(primary.TimeframeTodayText, fallback.TimeframeTodayText),
+            TimeframeYesterdayText = FirstConfigured(
+                primary.TimeframeYesterdayText,
+                fallback.TimeframeYesterdayText),
+            TimeframeCustomText = FirstConfigured(primary.TimeframeCustomText, fallback.TimeframeCustomText),
             DatePickerOkButton = FirstConfigured(primary.DatePickerOkButton, fallback.DatePickerOkButton),
             SearchButton = FirstConfigured(primary.SearchButton, fallback.SearchButton),
             ReportLoadingIndicator = FirstConfigured(
                 primary.ReportLoadingIndicator,
                 fallback.ReportLoadingIndicator),
+            ReportErrorMessage = FirstConfigured(primary.ReportErrorMessage, fallback.ReportErrorMessage),
             ReportTable = FirstConfigured(primary.ReportTable, fallback.ReportTable),
             ReportRows = FirstConfigured(primary.ReportRows, fallback.ReportRows),
             ShopCodeCell = FirstConfigured(primary.ShopCodeCell, fallback.ShopCodeCell),
@@ -297,9 +371,13 @@ public sealed class ImportRunResult
 {
     public bool Success { get; init; }
 
+    public bool IsRecoverableFailure { get; init; }
+
     public string ClientCode { get; init; } = string.Empty;
 
     public bool DryRun { get; init; }
+
+    public string? Period { get; init; }
 
     public DateTime BusinessDate { get; init; }
 
@@ -317,6 +395,18 @@ public sealed class ImportRunResult
 
     public string ToDateValue { get; init; } = string.Empty;
 
+    public string RequestedFromDateValue { get; init; } = string.Empty;
+
+    public string RequestedToDateValue { get; init; } = string.Empty;
+
+    public string ActualFromDateValue { get; init; } = string.Empty;
+
+    public string ActualToDateValue { get; init; } = string.Empty;
+
+    public string PortalAvailabilityMessage { get; init; } = string.Empty;
+
+    public bool RetriedWithAvailableRange { get; init; }
+
     public string GeneratedReportScreenshotPath { get; init; } = string.Empty;
 
     public string GeneratedReportHtmlPath { get; init; } = string.Empty;
@@ -329,9 +419,14 @@ public sealed class ImportRunResult
         string clientCode,
         DateTime businessDate,
         bool dryRun,
+        string? period,
         IReadOnlyCollection<VirtualSportsImportRow> rows,
-        string fromDateValue,
-        string toDateValue,
+        string requestedFromDateValue,
+        string requestedToDateValue,
+        string actualFromDateValue,
+        string actualToDateValue,
+        string portalAvailabilityMessage,
+        bool retriedWithAvailableRange,
         string generatedReportScreenshotPath,
         string generatedReportHtmlPath)
     {
@@ -340,14 +435,21 @@ public sealed class ImportRunResult
             Success = true,
             ClientCode = clientCode,
             DryRun = dryRun,
+            Period = period,
             BusinessDate = businessDate.Date,
             RowCount = rows.Count,
             RowsImported = dryRun ? 0 : rows.Count,
             TotalSales = rows.Sum(row => row.Sales),
             TotalPayout = rows.Sum(row => row.Payout),
             TotalTickets = rows.Sum(row => row.TicketCount),
-            FromDateValue = fromDateValue,
-            ToDateValue = toDateValue,
+            FromDateValue = actualFromDateValue,
+            ToDateValue = actualToDateValue,
+            RequestedFromDateValue = requestedFromDateValue,
+            RequestedToDateValue = requestedToDateValue,
+            ActualFromDateValue = actualFromDateValue,
+            ActualToDateValue = actualToDateValue,
+            PortalAvailabilityMessage = portalAvailabilityMessage,
+            RetriedWithAvailableRange = retriedWithAvailableRange,
             GeneratedReportScreenshotPath = generatedReportScreenshotPath,
             GeneratedReportHtmlPath = generatedReportHtmlPath,
             Rows = rows,
@@ -359,25 +461,39 @@ public sealed class ImportRunResult
         string clientCode,
         DateTime businessDate,
         bool dryRun,
+        string? period,
         IReadOnlyList<string> errors,
-        string fromDateValue = "",
-        string toDateValue = "",
+        string requestedFromDateValue = "",
+        string requestedToDateValue = "",
+        string actualFromDateValue = "",
+        string actualToDateValue = "",
+        string portalAvailabilityMessage = "",
+        bool retriedWithAvailableRange = false,
         string generatedReportScreenshotPath = "",
-        string generatedReportHtmlPath = "")
+        string generatedReportHtmlPath = "",
+        bool isRecoverableFailure = false)
     {
         return new ImportRunResult
         {
             Success = false,
+            IsRecoverableFailure = isRecoverableFailure,
             ClientCode = clientCode,
             DryRun = dryRun,
+            Period = period,
             BusinessDate = businessDate.Date,
             RowCount = 0,
             RowsImported = 0,
             TotalSales = 0,
             TotalPayout = 0,
             TotalTickets = 0,
-            FromDateValue = fromDateValue,
-            ToDateValue = toDateValue,
+            FromDateValue = actualFromDateValue,
+            ToDateValue = actualToDateValue,
+            RequestedFromDateValue = requestedFromDateValue,
+            RequestedToDateValue = requestedToDateValue,
+            ActualFromDateValue = actualFromDateValue,
+            ActualToDateValue = actualToDateValue,
+            PortalAvailabilityMessage = portalAvailabilityMessage,
+            RetriedWithAvailableRange = retriedWithAvailableRange,
             GeneratedReportScreenshotPath = generatedReportScreenshotPath,
             GeneratedReportHtmlPath = generatedReportHtmlPath,
             Rows = [],

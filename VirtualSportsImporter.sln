@@ -5,6 +5,10 @@ VisualStudioVersion = 17.9.34728.123
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VirtualSportsImporter", "VirtualSportsImporter.csproj", "{9CDC4D1D-589A-4582-9922-2AF01DB3E307}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{405C5FED-1F15-440C-8EEA-6F33800F67EC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VirtualSportsImporter.Tests", "tests\VirtualSportsImporter.Tests\VirtualSportsImporter.Tests.csproj", "{10C5A686-4DDA-478B-AE5F-7FCE82AA909A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,11 +19,18 @@ Global
 		{9CDC4D1D-589A-4582-9922-2AF01DB3E307}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{9CDC4D1D-589A-4582-9922-2AF01DB3E307}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{9CDC4D1D-589A-4582-9922-2AF01DB3E307}.Release|Any CPU.Build.0 = Release|Any CPU
+		{10C5A686-4DDA-478B-AE5F-7FCE82AA909A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{10C5A686-4DDA-478B-AE5F-7FCE82AA909A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{10C5A686-4DDA-478B-AE5F-7FCE82AA909A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{10C5A686-4DDA-478B-AE5F-7FCE82AA909A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {171C2410-1315-43BC-8A2D-94BA31B17775}
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{10C5A686-4DDA-478B-AE5F-7FCE82AA909A} = {405C5FED-1F15-440C-8EEA-6F33800F67EC}
 	EndGlobalSection
 EndGlobal
