@@ -46,6 +46,7 @@
   "Clients": [
     {
       "ClientCode": "EXAMPLE_CLIENT",
+      "ClientId": "",
       "BaseUrl": "",
       "ApiKey": "",
       "BulkImportPath": "/api/management/product-imports/virtualsports/bulk",

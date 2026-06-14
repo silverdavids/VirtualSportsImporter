@@ -110,6 +110,7 @@ public sealed class DiagnosticsController : ControllerBase
             ["ReportSelectors.TicketCountCell"] = IsConfigured(virtualSports.Selectors.TicketCountCell),
             ["ReportSelectors.TotalInCell"] = IsConfigured(virtualSports.Selectors.TotalInCell),
             ["ReportSelectors.TotalOutCell"] = IsConfigured(virtualSports.Selectors.TotalOutCell),
+            ["ClientId"] = IsConfigured(client.ClientId),
             ["BaseUrl"] = IsConfigured(client.BaseUrl) && client.BaseUrl != "https://smartbet...",
             ["ApiKey"] = IsConfigured(client.ApiKey),
             ["BulkImportPath"] = IsConfigured(client.BulkImportPath)

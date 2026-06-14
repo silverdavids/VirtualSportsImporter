@@ -48,12 +48,16 @@ public sealed class ProductImportApiClient
         request.Headers.Add("X-Import-Api-Key", client.ApiKey);
         request.Content = JsonContent.Create(new
         {
+            clientCode = client.ClientCode,
+            clientId = client.ClientId,
             sourceSystem = "VirtualSports",
             businessDate = businessDate.ToString("yyyy-MM-dd"),
             rows = rows.Select(row => new
             {
+                sourceSystem = row.SourceSystem,
                 externalShopCode = row.ExternalShopCode,
                 externalShopName = row.ExternalShopName,
+                businessDate = row.BusinessDate.ToString("yyyy-MM-dd"),
                 sales = row.Sales,
                 payout = row.Payout,
                 ticketCount = row.TicketCount
